@@ -1,0 +1,11 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 54;
+	objects = {
+		/* Placeholder - run 'flutter create .' in project root to generate full Xcode project */
+	};
+	rootObject = 000000000000000000000001 /* Project object */;
+}
