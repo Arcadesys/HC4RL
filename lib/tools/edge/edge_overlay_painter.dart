@@ -61,6 +61,10 @@ class EdgeOverlayPainter extends CustomPainter {
     this.color = const Color(0xFF00FF00),
     this.pointMode = PointMode.points,
     this.strokeWidth = 1.5,
+    this.invertEdges = false,
+    this.contours,
+    this.selectedContourIndex = -1,
+    this.strengths,
   });
 
   final List<cv.Point> edgePoints;
@@ -73,6 +77,13 @@ class EdgeOverlayPainter extends CustomPainter {
   final Color color;
   final PointMode pointMode;
   final double strokeWidth;
+  /// When true, draw edges dark on bright (e.g. black) for light backgrounds.
+  final bool invertEdges;
+  /// Contours in same space as edgePoints (for tap-to-focus). When [selectedContourIndex] >= 0, draw selected bold and others faded.
+  final List<List<cv.Point>>? contours;
+  final int selectedContourIndex;
+  /// Optional per-point strength (same length as edgePoints) for thickness-by-confidence.
+  final List<double>? strengths;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -98,16 +109,93 @@ class EdgeOverlayPainter extends CustomPainter {
       offsetY = (h - imageHeight * scale) / 2;
     }
 
-    final List<Offset> offsets = edgePoints
-        .map((p) => Offset(offsetX + p.x * scale, offsetY + p.y * scale))
-        .toList();
+    final Color drawColor =
+        invertEdges ? const Color(0xFF000000) : color;
 
-    final Paint paint = Paint()
-      ..color = color
-      ..strokeWidth = strokeWidth
-      ..strokeCap = StrokeCap.round;
+    final bool hasSelection =
+        contours != null &&
+        contours!.isNotEmpty &&
+        selectedContourIndex >= 0 &&
+        selectedContourIndex < contours!.length;
+    final bool hasStrengths =
+        !hasSelection &&
+        strengths != null &&
+        strengths!.length == edgePoints.length &&
+        strengths!.isNotEmpty;
 
-    canvas.drawPoints(pointMode, offsets, paint);
+    if (hasSelection) {
+      final Color dimColor = drawColor.withValues(alpha: 0.25);
+      final Paint dimPaint = Paint()
+        ..color = dimColor
+        ..strokeWidth = strokeWidth * 0.8
+        ..strokeCap = StrokeCap.round;
+      final Paint boldPaint = Paint()
+        ..color = drawColor
+        ..strokeWidth = strokeWidth * 1.8
+        ..strokeCap = StrokeCap.round;
+      for (int i = 0; i < contours!.length; i++) {
+        final List<Offset> contourOffsets = contours![i]
+            .map((p) => Offset(offsetX + p.x * scale, offsetY + p.y * scale))
+            .toList();
+        if (contourOffsets.isEmpty) continue;
+        if (i == selectedContourIndex) {
+          canvas.drawPoints(pointMode, contourOffsets, boldPaint);
+        } else {
+          canvas.drawPoints(pointMode, contourOffsets, dimPaint);
+        }
+      }
+    } else if (hasStrengths) {
+      final List<int> indices =
+          List.generate(edgePoints.length, (i) => i);
+      indices.sort((a, b) => strengths![a].compareTo(strengths![b]));
+      final int n = indices.length;
+      final int weakEnd = (n * 0.33).round().clamp(0, n);
+      final int strongStart = (n * 0.67).round().clamp(0, n);
+      final double thin = strokeWidth * 0.6;
+      final double thick = strokeWidth * 1.5;
+      final Paint thinPaint = Paint()
+        ..color = drawColor
+        ..strokeWidth = thin
+        ..strokeCap = StrokeCap.round;
+      final Paint midPaint = Paint()
+        ..color = drawColor
+        ..strokeWidth = strokeWidth
+        ..strokeCap = StrokeCap.round;
+      final Paint thickPaint = Paint()
+        ..color = drawColor
+        ..strokeWidth = thick
+        ..strokeCap = StrokeCap.round;
+      final List<Offset> weakOffsets = indices
+          .sublist(0, weakEnd)
+          .map((i) => Offset(
+              offsetX + edgePoints[i].x * scale,
+              offsetY + edgePoints[i].y * scale))
+          .toList();
+      final List<Offset> midOffsets = indices
+          .sublist(weakEnd, strongStart)
+          .map((i) => Offset(
+              offsetX + edgePoints[i].x * scale,
+              offsetY + edgePoints[i].y * scale))
+          .toList();
+      final List<Offset> strongOffsets = indices
+          .sublist(strongStart)
+          .map((i) => Offset(
+              offsetX + edgePoints[i].x * scale,
+              offsetY + edgePoints[i].y * scale))
+          .toList();
+      if (weakOffsets.isNotEmpty) canvas.drawPoints(pointMode, weakOffsets, thinPaint);
+      if (midOffsets.isNotEmpty) canvas.drawPoints(pointMode, midOffsets, midPaint);
+      if (strongOffsets.isNotEmpty) canvas.drawPoints(pointMode, strongOffsets, thickPaint);
+    } else {
+      final List<Offset> offsets = edgePoints
+          .map((p) => Offset(offsetX + p.x * scale, offsetY + p.y * scale))
+          .toList();
+      final Paint paint = Paint()
+        ..color = drawColor
+        ..strokeWidth = strokeWidth
+        ..strokeCap = StrokeCap.round;
+      canvas.drawPoints(pointMode, offsets, paint);
+    }
   }
 
   @override
@@ -120,6 +208,10 @@ class EdgeOverlayPainter extends CustomPainter {
         oldDelegate.previewFit != previewFit ||
         oldDelegate.color != color ||
         oldDelegate.pointMode != pointMode ||
-        oldDelegate.strokeWidth != strokeWidth;
+        oldDelegate.strokeWidth != strokeWidth ||
+        oldDelegate.invertEdges != invertEdges ||
+        oldDelegate.contours != contours ||
+        oldDelegate.selectedContourIndex != selectedContourIndex ||
+        oldDelegate.strengths != strengths;
   }
 }

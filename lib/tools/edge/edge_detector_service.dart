@@ -72,9 +72,17 @@ class EdgeDetectorInput {
 }
 
 /// Output: list of (x, y) edge pixel coordinates in image space.
+/// [contours] is the list of contours (each a list of points) that passed minArea, for tap-to-focus.
+/// [strengths] optional per-point gradient magnitude (same length as points) for confidence styling.
 class EdgeDetectorOutput {
-  const EdgeDetectorOutput({required this.points});
+  const EdgeDetectorOutput({
+    required this.points,
+    this.contours,
+    this.strengths,
+  });
   final List<cv.Point> points;
+  final List<List<cv.Point>>? contours;
+  final List<double>? strengths;
 }
 
 /// Runs in isolate: grayscale → [optional CLAHE] → [optional downscale] → blur → Canny →
@@ -132,6 +140,26 @@ EdgeDetectorOutput runEdgeDetection(EdgeDetectorInput input) {
   final int aperture = kSobelApertureSizes.contains(input.sobelApertureSize)
       ? input.sobelApertureSize
       : 3;
+  cv.Mat? magMat;
+  if (input.primaryEdgesOnly) {
+    final cv.Mat gradX = cv.sobel(
+      work,
+      cv.MatType.CV_32F,
+      1,
+      0,
+      ksize: aperture,
+    );
+    final cv.Mat gradY = cv.sobel(
+      work,
+      cv.MatType.CV_32F,
+      0,
+      1,
+      ksize: aperture,
+    );
+    magMat = cv.magnitude(gradX, gradY);
+    gradX.dispose();
+    gradY.dispose();
+  }
   final cv.Mat edges = cv.canny(
     work,
     input.cannyLow,
@@ -140,6 +168,7 @@ EdgeDetectorOutput runEdgeDetection(EdgeDetectorInput input) {
   );
   work.dispose();
   if (edges.isEmpty) {
+    magMat?.dispose();
     src.dispose();
     return const EdgeDetectorOutput(points: []);
   }
@@ -158,15 +187,50 @@ EdgeDetectorOutput runEdgeDetection(EdgeDetectorInput input) {
 
   final double scaleBack = downscale ? (1.0 / scaleFactor) : 1.0;
   final int minArea = input.minContourArea;
-  final List<cv.Point> points = [];
+  final List<cv.Point> rawPoints = [];
+  final List<double> magnitudes = [];
+  final List<List<cv.Point>> contourList = [];
 
   try {
     for (int i = 0; i < contours.length; i++) {
       final cv.VecPoint contour = contours[i];
       final double area = cv.contourArea(contour);
       if (minArea > 0 && area < minArea) continue;
+      final List<cv.Point> contourPoints = [];
       for (int j = 0; j < contour.length; j++) {
         final p = contour[j];
+        rawPoints.add(cv.Point(p.x, p.y));
+        contourPoints.add(
+          downscale
+              ? cv.Point((p.x * scaleBack).round(), (p.y * scaleBack).round())
+              : cv.Point(p.x, p.y),
+        );
+        if (magMat != null) {
+          final int row = p.y.clamp(0, magMat.rows - 1);
+          final int col = p.x.clamp(0, magMat.cols - 1);
+          magnitudes.add(magMat.atF32(row, i1: col));
+        }
+      }
+      contourList.add(contourPoints);
+    }
+  } finally {
+    contours.dispose();
+    hierarchy.dispose();
+    magMat?.dispose();
+  }
+
+  List<cv.Point> points;
+  List<double>? outStrengths;
+  if (input.primaryEdgesOnly && magnitudes.length == rawPoints.length && magnitudes.isNotEmpty) {
+    final double pct = input.primaryEdgesPercentile.clamp(0.0, 1.0);
+    final List<double> sorted = List<double>.from(magnitudes)..sort();
+    final int idx = ((sorted.length - 1) * pct).round().clamp(0, sorted.length - 1);
+    final double threshold = sorted[idx];
+    points = <cv.Point>[];
+    final List<double> kept = <double>[];
+    for (int i = 0; i < rawPoints.length; i++) {
+      if (magnitudes[i] >= threshold) {
+        final p = rawPoints[i];
         if (downscale) {
           points.add(cv.Point(
             (p.x * scaleBack).round(),
@@ -175,13 +239,26 @@ EdgeDetectorOutput runEdgeDetection(EdgeDetectorInput input) {
         } else {
           points.add(cv.Point(p.x, p.y));
         }
+        kept.add(magnitudes[i]);
       }
     }
-  } finally {
-    contours.dispose();
-    hierarchy.dispose();
+    outStrengths = kept;
+  } else {
+    points = downscale
+        ? rawPoints
+            .map((p) => cv.Point(
+                  (p.x * scaleBack).round(),
+                  (p.y * scaleBack).round(),
+                ))
+            .toList()
+        : rawPoints;
   }
+
   src.dispose();
 
-  return EdgeDetectorOutput(points: points);
+  return EdgeDetectorOutput(
+    points: points,
+    contours: contourList.isEmpty ? null : contourList,
+    strengths: outStrengths,
+  );
 }
