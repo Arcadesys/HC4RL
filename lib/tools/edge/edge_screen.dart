@@ -11,6 +11,7 @@ import 'edge_detector_service.dart'
     show
         EdgeDetectorInput,
         EdgeDetectorOutput,
+        EdgeMode,
         EdgePreset,
         kSobelApertureSizes,
         runEdgeDetection;
@@ -51,12 +52,15 @@ class _EdgeScreenState extends State<EdgeScreen> {
   int _frameSkipCounter = 0;
 
   // Settings (drawer)
+  EdgeMode _edgeMode = EdgeMode.inspect;
   EdgePreset _edgePreset = EdgePreset.normal;
   int _overlayColorIndex = 0;
   int _strokeWidthIndex = 1; // medium
   int _sobelApertureIndex = 0; // 3 (sharper) by default
   bool _dimmedView = false;
   bool _enhanceBeforeEdges = false;
+  /// Min contour area (pixels²); contours below this are dropped. 0 = show all.
+  int _minContourArea = 0;
 
   @override
   void initState() {
@@ -100,6 +104,9 @@ class _EdgeScreenState extends State<EdgeScreen> {
     final int h = image.height;
     final EdgePreset preset = _edgePreset;
     final bool enhance = _enhanceBeforeEdges;
+    final int minArea = _edgeMode == EdgeMode.find
+        ? (_minContourArea < 200 ? 200 : _minContourArea)
+        : _minContourArea;
     final EdgeDetectorInput input = EdgeDetectorInput(
       width: w,
       height: h,
@@ -111,6 +118,7 @@ class _EdgeScreenState extends State<EdgeScreen> {
       sobelApertureSize: kSobelApertureSizes[
           _sobelApertureIndex.clamp(0, kSobelApertureSizes.length - 1)],
       enhanceBeforeEdges: enhance,
+      minContourArea: minArea,
     );
     // Run on main isolate: opencv_dart/FFI often fails inside compute() on mobile.
     Future<EdgeDetectorOutput>(() => runEdgeDetection(input))
@@ -317,6 +325,35 @@ class _EdgeScreenState extends State<EdgeScreen> {
               style: TextStyle(color: Colors.white, fontSize: 24),
             ),
           ),
+          _sectionTitle('Mode'),
+          ...EdgeMode.values.map((mode) {
+            final isSelected = _edgeMode == mode;
+            return ListTile(
+              title: Text(mode == EdgeMode.find ? 'Find (object boundaries)' : 'Inspect (fine detail)'),
+              subtitle: Text(
+                mode == EdgeMode.find
+                    ? 'Fewer lines, thicker, higher confidence'
+                    : 'More lines, finer detail',
+              ),
+              trailing: isSelected ? const Icon(Icons.check) : null,
+              onTap: () {
+                setState(() {
+                  _edgeMode = mode;
+                  if (mode == EdgeMode.find) {
+                    _edgePreset = EdgePreset.highContrast;
+                    _minContourArea = _minContourArea < 200 ? 200 : _minContourArea;
+                    _strokeWidthIndex = 2; // thick
+                  } else {
+                    _edgePreset = EdgePreset.normal;
+                    _minContourArea = 0;
+                    _strokeWidthIndex = 0; // thin
+                  }
+                });
+                Navigator.of(context).pop();
+              },
+            );
+          }),
+          const Divider(),
           _sectionTitle('Edge detection'),
           ListTile(
             title: const Text('Sobel aperture'),
@@ -334,6 +371,12 @@ class _EdgeScreenState extends State<EdgeScreen> {
               },
             );
           }),
+          _sectionTitle('Noise (min contour size)'),
+          ListTile(
+            title: const Text('Min contour area'),
+            subtitle: Text(_noiseLabel(_minContourArea)),
+            onTap: () => _showNoiseSlider(context),
+          ),
           const Divider(),
           _sectionTitle('High-contrast / view'),
           ListTile(
@@ -408,6 +451,53 @@ class _EdgeScreenState extends State<EdgeScreen> {
     if (k == 3) return '3 — sharper gradients';
     if (k == 5) return '5 — balanced';
     return '7 — smoother gradients';
+  }
+
+  static const int _noiseSliderMax = 1000;
+  String _noiseLabel(int minArea) {
+    if (minArea <= 0) return 'Off (show all)';
+    if (minArea < 200) return 'Low ($minArea px²)';
+    if (minArea < 500) return 'Medium ($minArea px²)';
+    return 'High ($minArea px²)';
+  }
+
+  void _showNoiseSlider(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Min contour area (noise filter)',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _noiseLabel(_minContourArea),
+                style: const TextStyle(color: Colors.grey),
+              ),
+              Slider(
+                value: _minContourArea
+                    .toDouble()
+                    .clamp(0.0, _noiseSliderMax.toDouble()),
+                min: 0,
+                max: _noiseSliderMax.toDouble(),
+                divisions: 20,
+                label: _noiseLabel(_minContourArea),
+                onChanged: (v) {
+                  setState(() => _minContourArea = v.round());
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _showSobelPicker(BuildContext context) {

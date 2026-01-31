@@ -21,6 +21,13 @@ enum EdgePreset {
 /// Sobel aperture sizes supported by OpenCV Canny (gradient kernel). 3 = sharper, 7 = smoother.
 const List<int> kSobelApertureSizes = [3, 5, 7];
 
+/// Find: fewer lines, thicker, higher confidence (object boundaries).
+/// Inspect: more lines, finer detail (connector/label shape).
+enum EdgeMode {
+  find,
+  inspect,
+}
+
 /// Input for isolate: grayscale buffer dimensions, bytes, and optional params.
 class EdgeDetectorInput {
   const EdgeDetectorInput({
@@ -33,6 +40,10 @@ class EdgeDetectorInput {
     this.blurSigma = 1.0,
     this.sobelApertureSize = 3,
     this.enhanceBeforeEdges = false,
+    this.minContourArea = 0,
+    this.downscaleFactor = 1.0,
+    this.primaryEdgesOnly = false,
+    this.primaryEdgesPercentile = 0.9,
   });
 
   final int width;
@@ -46,6 +57,18 @@ class EdgeDetectorInput {
   /// Sobel kernel size for Canny gradient (3, 5, or 7).
   final int sobelApertureSize;
   final bool enhanceBeforeEdges;
+
+  /// Minimum contour area in pixels²; contours below this are dropped. 0 = show all.
+  final int minContourArea;
+
+  /// Scale factor for optional downscale before processing (e.g. 0.5 = half size). 1.0 = no downscale.
+  final double downscaleFactor;
+
+  /// When true, keep only edge pixels with gradient magnitude in the top (primaryEdgesPercentile*100)%.
+  final bool primaryEdgesOnly;
+
+  /// Percentile for primary edges (e.g. 0.9 = top 10%). Used when primaryEdgesOnly is true.
+  final double primaryEdgesPercentile;
 }
 
 /// Output: list of (x, y) edge pixel coordinates in image space.
@@ -54,7 +77,8 @@ class EdgeDetectorOutput {
   final List<cv.Point> points;
 }
 
-/// Runs in isolate: grayscale → [optional CLAHE] → blur → Canny → findNonZero → list of points.
+/// Runs in isolate: grayscale → [optional CLAHE] → [optional downscale] → blur → Canny →
+/// morphological close → findContours → filter by minContourArea → list of points.
 EdgeDetectorOutput runEdgeDetection(EdgeDetectorInput input) {
   final int width = input.width;
   final int height = input.height;
@@ -81,53 +105,83 @@ EdgeDetectorOutput runEdgeDetection(EdgeDetectorInput input) {
     }
   }
 
+  final double scaleFactor = input.downscaleFactor.clamp(0.25, 1.0);
+  final bool downscale = scaleFactor < 1.0;
+  cv.Mat work = src;
+  int workWidth = width;
+  int workHeight = height;
+  if (downscale) {
+    workWidth = (width * scaleFactor).round().clamp(1, width);
+    workHeight = (height * scaleFactor).round().clamp(1, height);
+    final cv.Mat resized = cv.resize(src, (workWidth, workHeight));
+    src.dispose();
+    src = resized;
+    work = resized;
+  }
+
   final int k = input.blurKernelSize;
   final double sigma = input.blurSigma;
-  final cv.Mat blurred = cv.gaussianBlur(src, (k, k), sigma);
-  src.dispose();
-  if (blurred.isEmpty) return const EdgeDetectorOutput(points: []);
+  final cv.Mat blurred = cv.gaussianBlur(work, (k, k), sigma);
+  if (downscale) work.dispose();
+  work = blurred;
+  if (blurred.isEmpty) {
+    src.dispose();
+    return const EdgeDetectorOutput(points: []);
+  }
 
   final int aperture = kSobelApertureSizes.contains(input.sobelApertureSize)
       ? input.sobelApertureSize
       : 3;
   final cv.Mat edges = cv.canny(
-    blurred,
+    work,
     input.cannyLow,
     input.cannyHigh,
     apertureSize: aperture,
   );
-  blurred.dispose();
-  if (edges.isEmpty) return const EdgeDetectorOutput(points: []);
-
-  final cv.Mat nonzero = cv.findNonZero(edges);
-  edges.dispose();
-  if (nonzero.isEmpty) return const EdgeDetectorOutput(points: []);
-
-  // findNonZero returns Nx1 CV_32SC2 (row r = point x,y). Read from raw buffer to avoid
-  // native cv_Mat_get_i32_3 crash on some devices (SIGSEGV in libdartcv.so).
-  final List<cv.Point> points = [];
-  final int rows = nonzero.rows;
-  final int numInt32 = rows * 2; // x,y per row
-  final int byteLen = numInt32 * 4;
-  try {
-    final Uint8List raw = nonzero.data;
-    if (raw.lengthInBytes < byteLen) {
-      nonzero.dispose();
-      return EdgeDetectorOutput(points: points);
-    }
-    final Int32List list = Int32List.view(
-      raw.buffer,
-      raw.offsetInBytes,
-      numInt32,
-    );
-    for (int r = 0; r < rows; r++) {
-      points.add(cv.Point(list[2 * r], list[2 * r + 1]));
-    }
-  } catch (_) {
-    // Fallback: avoid crash; return empty or skip this frame
-  } finally {
-    nonzero.dispose();
+  work.dispose();
+  if (edges.isEmpty) {
+    src.dispose();
+    return const EdgeDetectorOutput(points: []);
   }
+
+  final cv.Mat kernel = cv.getStructuringElement(cv.MORPH_RECT, (3, 3));
+  final cv.Mat closed = cv.morphologyEx(edges, cv.MORPH_CLOSE, kernel);
+  kernel.dispose();
+  edges.dispose();
+
+  final (cv.Contours contours, cv.VecVec4i hierarchy) = cv.findContours(
+    closed,
+    cv.RETR_EXTERNAL,
+    cv.CHAIN_APPROX_SIMPLE,
+  );
+  closed.dispose();
+
+  final double scaleBack = downscale ? (1.0 / scaleFactor) : 1.0;
+  final int minArea = input.minContourArea;
+  final List<cv.Point> points = [];
+
+  try {
+    for (int i = 0; i < contours.length; i++) {
+      final cv.VecPoint contour = contours[i];
+      final double area = cv.contourArea(contour);
+      if (minArea > 0 && area < minArea) continue;
+      for (int j = 0; j < contour.length; j++) {
+        final p = contour[j];
+        if (downscale) {
+          points.add(cv.Point(
+            (p.x * scaleBack).round(),
+            (p.y * scaleBack).round(),
+          ));
+        } else {
+          points.add(cv.Point(p.x, p.y));
+        }
+      }
+    }
+  } finally {
+    contours.dispose();
+    hierarchy.dispose();
+  }
+  src.dispose();
 
   return EdgeDetectorOutput(points: points);
 }
