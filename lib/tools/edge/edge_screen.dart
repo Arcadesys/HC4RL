@@ -8,6 +8,7 @@ import 'package:opencv_dart/opencv_dart.dart' as cv;
 
 import '../../services/camera_service.dart';
 import '../../utils/camera_image_converter.dart';
+import '../../utils/debug_log.dart';
 import 'edge_detector_service.dart'
     show
         EdgeDetectorInput,
@@ -60,8 +61,9 @@ class _EdgeScreenState extends State<EdgeScreen> {
   int _sobelApertureIndex = 0; // 3 (sharper) by default
   bool _dimmedView = false;
   bool _enhanceBeforeEdges = false;
-  /// Min contour area (pixels²); contours below this are dropped. 0 = show all.
-  int _minContourArea = 0;
+
+  /// Min contour area (pixels²); contours below this are dropped. 0 = show all. Default 15 filters dot noise in dark areas.
+  int _minContourArea = 15;
   bool _primaryEdgesOnly = false;
   bool _paused = false;
   bool _invertEdges = false;
@@ -193,8 +195,10 @@ class _EdgeScreenState extends State<EdgeScreen> {
     for (final points in history) {
       final Set<String> seen = {};
       for (final p in points) {
-        final int gx = (p.x / gridSize).floor().clamp(0, (width / gridSize).ceil());
-        final int gy = (p.y / gridSize).floor().clamp(0, (height / gridSize).ceil());
+        final int gx =
+            (p.x / gridSize).floor().clamp(0, (width / gridSize).ceil());
+        final int gy =
+            (p.y / gridSize).floor().clamp(0, (height / gridSize).ceil());
         final String key = '$gx,$gy';
         if (!seen.contains(key)) {
           seen.add(key);
@@ -248,22 +252,13 @@ class _EdgeScreenState extends State<EdgeScreen> {
     Future<EdgeDetectorOutput>(() => runEdgeDetection(input))
         .then((EdgeDetectorOutput out) {
       if (!mounted) return;
-      _pointHistory.add(out.points);
-      if (_pointHistory.length > _temporalFrames) {
-        _pointHistory.removeAt(0);
-      }
-      List<cv.Point> merged = out.points;
-      if (_pointHistory.length >= _temporalVotes) {
-        merged = _mergeTemporalEdges(
-          _pointHistory,
-          w,
-          h,
-          _temporalGrid,
-          _temporalVotes,
-        );
-      }
+      // #region agent log
+      debugLog('edge_screen.dart:_onImage', 'out from detector',
+          {'out.points.length': out.points.length, 'w': w, 'h': h}, 'H3');
+      // #endregion
+      // Use dense points directly for clean lines. Temporal merge collapses to one point per 4x4 cell and breaks lines.
       setState(() {
-        _edgePoints = merged;
+        _edgePoints = out.points;
         _contours = out.contours;
         _strengths = out.strengths;
         _imageWidth = w;
@@ -271,7 +266,7 @@ class _EdgeScreenState extends State<EdgeScreen> {
         _processing = false;
       });
       if (_hapticFeedbackOn) {
-        _maybeTriggerHaptics(merged, out.contours, w, h);
+        _maybeTriggerHaptics(out.points, out.contours, w, h);
       }
     }).catchError((Object err, StackTrace st) {
       debugPrintStack(stackTrace: st, label: err.toString());
@@ -347,7 +342,8 @@ class _EdgeScreenState extends State<EdgeScreen> {
                           ))
                       .toList()
                   : overlayPoints;
-          final List<List<cv.Point>>? scaledContours = _contours?.map((contour) {
+          final List<List<cv.Point>>? scaledContours =
+              _contours?.map((contour) {
             final (rotated, ow, oh) = rotateEdgePointsForDisplay(
               contour,
               _imageWidth,
@@ -363,16 +359,18 @@ class _EdgeScreenState extends State<EdgeScreen> {
                 .toList();
           }).toList();
           // Where the camera texture actually appears: letterboxed inside SizedBox, then cover to screen.
-          final double letterboxScale = (contentW / textureW) < (contentH / textureH)
-              ? contentW / textureW
-              : contentH / textureH;
+          final double letterboxScale =
+              (contentW / textureW) < (contentH / textureH)
+                  ? contentW / textureW
+                  : contentH / textureH;
           final double textureInContentW = textureW * letterboxScale;
           final double textureInContentH = textureH * letterboxScale;
           final double marginX = (contentW - textureInContentW) / 2;
           final double marginY = (contentH - textureInContentH) / 2;
-          final double coverScale = (size.width / contentW) > (size.height / contentH)
-              ? size.width / contentW
-              : size.height / contentH;
+          final double coverScale =
+              (size.width / contentW) > (size.height / contentH)
+                  ? size.width / contentW
+                  : size.height / contentH;
           final double offsetX = (size.width - contentW * coverScale) / 2;
           final double offsetY = (size.height - contentH * coverScale) / 2;
           final Rect textureRect = Rect.fromLTWH(
@@ -412,21 +410,24 @@ class _EdgeScreenState extends State<EdgeScreen> {
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTapDown: (TapDownDetails details) {
-                    if (scaledContours == null || scaledContours.isEmpty) return;
-                    final double texX = (details.localPosition.dx - textureRect.left) *
-                        textureW /
-                        textureRect.width;
-                    final double texY = (details.localPosition.dy - textureRect.top) *
-                        textureH /
-                        textureRect.height;
+                    if (scaledContours == null || scaledContours.isEmpty)
+                      return;
+                    final double texX =
+                        (details.localPosition.dx - textureRect.left) *
+                            textureW /
+                            textureRect.width;
+                    final double texY =
+                        (details.localPosition.dy - textureRect.top) *
+                            textureH /
+                            textureRect.height;
                     int hitIndex = -1;
                     for (int i = 0; i < scaledContours.length; i++) {
-                      final cv.VecPoint vec = cv.VecPoint.fromList(scaledContours[i]);
+                      final cv.VecPoint vec =
+                          cv.VecPoint.fromList(scaledContours[i]);
                       try {
                         if (cv.pointPolygonTest(
-                                vec,
-                                cv.Point2f(texX, texY),
-                                false) >= 0) {
+                                vec, cv.Point2f(texX, texY), false) >=
+                            0) {
                           hitIndex = i;
                           break;
                         }
@@ -509,7 +510,8 @@ class _EdgeScreenState extends State<EdgeScreen> {
                                   });
                                 }
                               } else {
-                                await CameraService.stopImageStream(_controller!);
+                                await CameraService.stopImageStream(
+                                    _controller!);
                                 if (mounted) {
                                   setState(() {
                                     _paused = true;
@@ -557,7 +559,9 @@ class _EdgeScreenState extends State<EdgeScreen> {
           ...EdgeMode.values.map((mode) {
             final isSelected = _edgeMode == mode;
             return ListTile(
-              title: Text(mode == EdgeMode.find ? 'Find (object boundaries)' : 'Inspect (fine detail)'),
+              title: Text(mode == EdgeMode.find
+                  ? 'Find (object boundaries)'
+                  : 'Inspect (fine detail)'),
               subtitle: Text(
                 mode == EdgeMode.find
                     ? 'Fewer lines, thicker, higher confidence'
@@ -569,11 +573,12 @@ class _EdgeScreenState extends State<EdgeScreen> {
                   _edgeMode = mode;
                   if (mode == EdgeMode.find) {
                     _edgePreset = EdgePreset.highContrast;
-                    _minContourArea = _minContourArea < 200 ? 200 : _minContourArea;
+                    _minContourArea =
+                        _minContourArea < 200 ? 200 : _minContourArea;
                     _strokeWidthIndex = 2; // thick
                   } else {
                     _edgePreset = EdgePreset.normal;
-                    _minContourArea = 0;
+                    _minContourArea = 15; // filters dot noise in dark areas
                     _strokeWidthIndex = 0; // thin
                   }
                 });

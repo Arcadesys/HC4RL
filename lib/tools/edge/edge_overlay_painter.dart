@@ -3,11 +3,14 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
+import '../../utils/debug_log.dart';
+
 /// Rotates edge points from camera image space to display space so the overlay
 /// matches the rotated preview. [sensorOrientation] is the clockwise angle
 /// (0, 90, 180, 270) the image must be rotated to be upright.
 /// Returns (rotated points, display width, display height).
-(List<cv.Point> points, int displayWidth, int displayHeight) rotateEdgePointsForDisplay(
+(List<cv.Point> points, int displayWidth, int displayHeight)
+    rotateEdgePointsForDisplay(
   List<cv.Point> points,
   int imageWidth,
   int imageHeight,
@@ -71,22 +74,42 @@ class EdgeOverlayPainter extends CustomPainter {
   final int imageWidth;
   final int imageHeight;
   final Size previewSize;
+
   /// When set, overlay is drawn inside this rect (e.g. camera texture letterbox rect); avoids vertical/horizontal offset.
   final Rect? contentRect;
   final BoxFit previewFit;
   final Color color;
   final PointMode pointMode;
   final double strokeWidth;
+
   /// When true, draw edges dark on bright (e.g. black) for light backgrounds.
   final bool invertEdges;
+
   /// Contours in same space as edgePoints (for tap-to-focus). When [selectedContourIndex] >= 0, draw selected bold and others faded.
   final List<List<cv.Point>>? contours;
   final int selectedContourIndex;
+
   /// Optional per-point strength (same length as edgePoints) for thickness-by-confidence.
   final List<double>? strengths;
 
   @override
   void paint(Canvas canvas, Size size) {
+    // #region agent log
+    debugLog(
+        'edge_overlay_painter.dart:paint',
+        'paint entry',
+        {
+          'edgePoints.length': edgePoints.length,
+          'imageWidth': imageWidth,
+          'imageHeight': imageHeight,
+          'contentRect': contentRect?.toString(),
+          'size': size.toString(),
+          'firstPoint': edgePoints.isNotEmpty
+              ? '${edgePoints.first.x},${edgePoints.first.y}'
+              : null,
+        },
+        'H4');
+    // #endregion
     if (edgePoints.isEmpty || imageWidth <= 0 || imageHeight <= 0) return;
 
     final double scale;
@@ -97,6 +120,26 @@ class EdgeOverlayPainter extends CustomPainter {
       scale = r.width / imageWidth;
       offsetX = r.left;
       offsetY = r.top;
+      // #region agent log
+      if (edgePoints.isNotEmpty) {
+        final double sx = offsetX + edgePoints.first.x * scale;
+        final double sy = offsetY + edgePoints.first.y * scale;
+        debugLog(
+            'edge_overlay_painter.dart:paint',
+            'contentRect transform',
+            {
+              'scale': scale,
+              'offsetX': offsetX,
+              'offsetY': offsetY,
+              'rectW': r.width,
+              'rectH': r.height,
+              'sampleScreenX': sx,
+              'sampleScreenY': sy,
+              'canvasSize': '${size.width}x${size.height}'
+            },
+            'H5');
+      }
+      // #endregion
     } else {
       final double w = size.width;
       final double h = size.height;
@@ -109,16 +152,13 @@ class EdgeOverlayPainter extends CustomPainter {
       offsetY = (h - imageHeight * scale) / 2;
     }
 
-    final Color drawColor =
-        invertEdges ? const Color(0xFF000000) : color;
+    final Color drawColor = invertEdges ? const Color(0xFF000000) : color;
 
-    final bool hasSelection =
-        contours != null &&
+    final bool hasSelection = contours != null &&
         contours!.isNotEmpty &&
         selectedContourIndex >= 0 &&
         selectedContourIndex < contours!.length;
-    final bool hasStrengths =
-        !hasSelection &&
+    final bool hasStrengths = !hasSelection &&
         strengths != null &&
         strengths!.length == edgePoints.length &&
         strengths!.isNotEmpty;
@@ -145,8 +185,7 @@ class EdgeOverlayPainter extends CustomPainter {
         }
       }
     } else if (hasStrengths) {
-      final List<int> indices =
-          List.generate(edgePoints.length, (i) => i);
+      final List<int> indices = List.generate(edgePoints.length, (i) => i);
       indices.sort((a, b) => strengths![a].compareTo(strengths![b]));
       final int n = indices.length;
       final int weakEnd = (n * 0.33).round().clamp(0, n);
@@ -167,25 +206,25 @@ class EdgeOverlayPainter extends CustomPainter {
         ..strokeCap = StrokeCap.round;
       final List<Offset> weakOffsets = indices
           .sublist(0, weakEnd)
-          .map((i) => Offset(
-              offsetX + edgePoints[i].x * scale,
+          .map((i) => Offset(offsetX + edgePoints[i].x * scale,
               offsetY + edgePoints[i].y * scale))
           .toList();
       final List<Offset> midOffsets = indices
           .sublist(weakEnd, strongStart)
-          .map((i) => Offset(
-              offsetX + edgePoints[i].x * scale,
+          .map((i) => Offset(offsetX + edgePoints[i].x * scale,
               offsetY + edgePoints[i].y * scale))
           .toList();
       final List<Offset> strongOffsets = indices
           .sublist(strongStart)
-          .map((i) => Offset(
-              offsetX + edgePoints[i].x * scale,
+          .map((i) => Offset(offsetX + edgePoints[i].x * scale,
               offsetY + edgePoints[i].y * scale))
           .toList();
-      if (weakOffsets.isNotEmpty) canvas.drawPoints(pointMode, weakOffsets, thinPaint);
-      if (midOffsets.isNotEmpty) canvas.drawPoints(pointMode, midOffsets, midPaint);
-      if (strongOffsets.isNotEmpty) canvas.drawPoints(pointMode, strongOffsets, thickPaint);
+      if (weakOffsets.isNotEmpty)
+        canvas.drawPoints(pointMode, weakOffsets, thinPaint);
+      if (midOffsets.isNotEmpty)
+        canvas.drawPoints(pointMode, midOffsets, midPaint);
+      if (strongOffsets.isNotEmpty)
+        canvas.drawPoints(pointMode, strongOffsets, thickPaint);
     } else {
       final List<Offset> offsets = edgePoints
           .map((p) => Offset(offsetX + p.x * scale, offsetY + p.y * scale))
