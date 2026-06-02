@@ -25,6 +25,9 @@ android/app/release
 **/ios/.symlinks/
 **/ios/Flutter/ephemeral
 **/ios/Flutter/Flutter.framework
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/Flutter/Generated.xcconfig
+**/ios/Runner/GeneratedPluginRegistrant.*
 **/ios/**/xcuserdata/
 **/ios/DerivedData/
 **/macos/Flutter/ephemeral
